@@ -11,8 +11,8 @@ module Codec.Compression.Zlib.Adler32 (
 
 import Data.Bits (shiftL, (.|.))
 import qualified Data.ByteString as S
-import GHC.Exts (Word#, plusWord#, remWord#)
-import GHC.Word (Word32 (..), Word8 (..))
+import GHC.Exts (Word#, plusWord#, remWord#, word8ToWord#)
+import GHC.Word (Word32 (..), Word8 (..), Word (..))
 
 data AdlerState = AdlerState {_adlerA :: Word#, _adlerB :: Word#}
 
@@ -22,14 +22,14 @@ initialAdlerState = AdlerState 1## 0##
 advanceAdler :: AdlerState -> Word8 -> AdlerState
 advanceAdler (AdlerState a b) (W8# v) = AdlerState a' b'
  where
-  a' = (a `plusWord#` v) `remWord#` 65521##
+  a' = (a `plusWord#` (word8ToWord# v)) `remWord#` 65521##
   b' = (b `plusWord#` a') `remWord#` 65521##
 {-# INLINE advanceAdler #-}
 
 advanceNoMod :: AdlerState -> Word8 -> AdlerState
 advanceNoMod (AdlerState a b) (W8# v) = AdlerState a' b'
  where
-  a' = a `plusWord#` v
+  a' = a `plusWord#` (word8ToWord# v)
   b' = b `plusWord#` a'
 {-# INLINE advanceNoMod #-}
 
@@ -51,7 +51,7 @@ advanceAdlerBlock !state !bl
   (!first5551, !rest) = S.splitAt 5551 bl
 
 finalizeAdler :: AdlerState -> Word32
-finalizeAdler (AdlerState a b) = high .|. low
+finalizeAdler (AdlerState a b) = fromIntegral (high .|. low)
  where
-  high = (W32# b) `shiftL` 16
-  low = W32# a
+  high = (W# b) `shiftL` 16
+  low = W# a
