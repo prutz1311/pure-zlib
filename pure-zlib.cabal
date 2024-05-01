@@ -29,6 +29,7 @@ library
                       bytestring-builder,
                       containers,
                       vector,
+                      vector-stream,
                       primitive
   if !impl(ghc >= 8.0)
     build-depends: semigroups
@@ -39,6 +40,7 @@ library
                       Codec.Compression.Zlib.HuffmanTree,
                       Codec.Compression.Zlib.Monad,
                       Codec.Compression.Zlib.OutputWindow
+                      Codec.Compression.Zlib.Compression
   default-extensions:
                       BangPatterns,
                       DeriveDataTypeable,
