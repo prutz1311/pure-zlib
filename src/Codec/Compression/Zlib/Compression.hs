@@ -15,7 +15,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Short as SBS
 import qualified Data.IntMap.Strict as Map
 import Data.Array (Array, accumArray, array, (!))
-import Control.Monad (forM_, when, zipWithM_)
+import Control.Monad (forM_, when, unless, zipWithM_)
 import GHC.ST (ST (..))
 import Data.STRef (newSTRef, modifySTRef', readSTRef, writeSTRef)
 import Control.Monad.ST (stToIO)
@@ -240,13 +240,6 @@ fillWindow checksum window inputString strstart nextIn lookahead = do
       fillResult = if more >= availIn then InputConsumed else WindowFull
   return (fillResult, (newStrstart, newLookahead, (nextIn + toCopy)))
 
-data BlockState
-  = NeedMore
-  | BlockDone
-  | FinishStarted
-  | FinishDone
-  deriving (Eq, Show)
-
 emitMatch :: forall s. STRef s [MatchInfo] -> MatchInfo -> ST s ()
 emitMatch miStackRef mi = modifySTRef' miStackRef (mi :)
 
@@ -312,34 +305,30 @@ clearBuffers m = do
 
 -- TODO: resulting BlockState is never used?
 -- The loop used in `deflateFast`
-dgo :: forall s. B.ByteString -> Bool -> MutableData s -> Int -> Int -> Int -> ST s BlockState
+dgo :: forall s. B.ByteString -> Bool -> MutableData s -> Int -> Int -> Int -> ST s ()
 dgo input haveInput md@MutableData{..} strstart nextIn lookahead = do
-  if lookahead == 0
-  then return BlockDone
-  else if lookahead >= wantMinMatch
-       then do -- main logic
-         mi@(MatchInfo dist len) <- advanceWindow window hash prev (fromIntegral strstart)
-         emitMatch matchStackRef mi
-         let (str, lkh) = 
-               if dist == 0
-               then (strstart + 1, lookahead - 1)
-               else (strstart + fromIntegral len, lookahead - fromIntegral len)
-         (fillResult, (newStrstart, newLookahead, newNextIn)) <-
-           fillWindow checksum window input str nextIn lkh
-         dgo input (hasMoreInput fillResult) md newStrstart newNextIn newLookahead
-       else do
-         forM_ [0..(lookahead-1)] $ \i -> do -- add literal matches one by one
-           let pos = fromIntegral strstart + i
-           literalByte <- MV.unsafeRead window pos
-           _ <- insertQuick window hash prev (fromIntegral pos)
-           emitMatch matchStackRef (MatchInfo 0 literalByte)
-           return ()
-         if haveInput
-         then do
-           (fillResult, (newStrstart, newLookahead, newNextIn)) <-
-             fillWindow checksum window input (strstart + lookahead) (nextIn + lookahead) 0
-           dgo input (hasMoreInput fillResult) md newStrstart newNextIn newLookahead
-         else return BlockDone
+  unless (lookahead == 0) $
+    if lookahead >= wantMinMatch
+    then do -- main logic
+      mi@(MatchInfo dist len) <- advanceWindow window hash prev (fromIntegral strstart)
+      emitMatch matchStackRef mi
+      let (str, lkh) =
+            if dist == 0
+            then (strstart + 1, lookahead - 1)
+            else (strstart + fromIntegral len, lookahead - fromIntegral len)
+      (fillResult, (newStrstart, newLookahead, newNextIn)) <-
+        fillWindow checksum window input str nextIn lkh
+      dgo input (hasMoreInput fillResult) md newStrstart newNextIn newLookahead
+    else do
+      forM_ [0..(lookahead-1)] $ \i -> do -- add literal matches one by one
+        let pos = fromIntegral strstart + i
+        literalByte <- MV.unsafeRead window pos
+        _ <- insertQuick window hash prev (fromIntegral pos)
+        emitMatch matchStackRef (MatchInfo 0 literalByte)
+      when haveInput $ do
+        (fillResult, (newStrstart, newLookahead, newNextIn)) <-
+          fillWindow checksum window input (strstart + lookahead) (nextIn + lookahead) 0
+        dgo input (hasMoreInput fillResult) md newStrstart newNextIn newLookahead
 
 copyFromByteString :: B.ByteString -> ST s (MV.MVector s Word8)
 copyFromByteString bytes = V.thaw $ fromByteString $ SBS.toShort bytes
@@ -358,15 +347,15 @@ testDgo inputString = do
     checksum <- newSTRef initialAdlerState
     (fillResult, (newStrstart, newLookahead, newNextIn)) <-
       fillWindow checksum window inputString 0 0 0
-    res <- dgo
-             inputString
-             (hasMoreInput fillResult)
-             (MutableData matchStackRef outputBuf window hash prev checksum)
-             newStrstart
-             newNextIn
-             newLookahead
+    dgo
+      inputString
+      (hasMoreInput fillResult)
+      (MutableData matchStackRef outputBuf window hash prev checksum)
+      newStrstart
+      newNextIn
+      newLookahead
     matches <- fmap reverse (readSTRef matchStackRef)
-    return (matches, res)
+    return matches
   print m
 
 writeHeader :: forall s. MV.MVector s Word8 -> ST s Int
@@ -394,7 +383,7 @@ deflateFast :: forall s. Bool -> B.ByteString -> MutableData s -> Int -> ST s In
 deflateFast final inputString md@MutableData{..} outputPos = do
   (fillResult, (strstart, lookahead, nextIn)) <-
     fillWindow checksum window inputString 0 0 0
-  res <- dgo inputString (hasMoreInput fillResult) md strstart nextIn lookahead
+  dgo inputString (hasMoreInput fillResult) md strstart nextIn lookahead
   matches <- readSTRef matchStackRef
   (bytesWritten, nextBit) <- flushBlock final (MV.drop outputPos outputBuf) 0 matches
   clearBuffers md
