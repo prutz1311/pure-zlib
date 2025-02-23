@@ -26,7 +26,7 @@ import Data.Array (Array, accumArray, array, (!))
 import Control.Monad (forM_, when, unless, zipWithM_)
 import GHC.ST (ST (..))
 import Data.STRef (newSTRef, modifySTRef', readSTRef, writeSTRef)
-import Control.Monad.ST (runST, stToIO)
+import Control.Monad.ST (runST)
 import GHC.STRef (STRef (..))
 import GHC.Word (Word8, Word16, Word32)
 
@@ -117,11 +117,6 @@ distArray = array (1, 32768) $ concat
 boolToBit :: Bool -> Word8
 boolToBit False = 0
 boolToBit True = 1
-
-toBits :: Word8 -> [Word8]
-toBits x =
-  let len = finiteBitSize x - countLeadingZeros x
-  in map (boolToBit . testBit x) [len-1, len-2 .. 0]
 
 toBitsPadded :: Int -> Word8 -> [Word8]
 toBitsPadded len x =
@@ -345,31 +340,6 @@ dgo input haveInput md@MutableData{..} strstart nextIn lookahead = do
 copyFromByteString :: B.ByteString -> ST s (MV.MVector s Word8)
 copyFromByteString bytes = V.thaw $ fromByteString $ SBS.toShort bytes
 
-bufToList :: forall s. MV.MVector s Word8 -> ST s [Word8]
-bufToList = fmap V.toList . V.unsafeFreeze
-
-testDgo :: B.ByteString -> IO ()
-testDgo inputString = do
-  m <- stToIO $ do
-    matchStackRef <- newSTRef []
-    outputBuf <- MV.new (64 * 1024)
-    window <- MV.new (65 * 1024)
-    hash <- MV.new (64 * 1024)
-    prev <- MV.new (64 * 1024)
-    checksum <- newSTRef initialAdlerState
-    (fillResult, (newStrstart, newLookahead, newNextIn)) <-
-      fillWindow checksum window inputString 0 0 0
-    dgo
-      inputString
-      (hasMoreInput fillResult)
-      (MutableData matchStackRef outputBuf window hash prev checksum)
-      newStrstart
-      newNextIn
-      newLookahead
-    matches <- fmap reverse (readSTRef matchStackRef)
-    return matches
-  print m
-
 writeHeader :: forall s. MV.MVector s Word8 -> ST s Int
 writeHeader outputBuf = do
   MV.write outputBuf 0 0x78
@@ -436,55 +406,6 @@ compressToBuilder input = do
 
 compress :: BL.ByteString -> BL.ByteString
 compress input = BB.toLazyByteString $ runST $ compressToBuilder input
-
-testDecompressMediumSingle :: B.ByteString -> ST s B.ByteString
-testDecompressMediumSingle inputString = do
-  (outputPos, m) <- deflateInit
-  outputLen <- deflateFast True inputString m outputPos
-  ovec <- V.freeze (MV.take outputLen (outputBuf m))
-  return (SBS.fromShort (toByteString ovec))
-
-testAdler :: B.ByteString -> Word32
-testAdler s = finalizeAdler (advanceAdlerBlock initialAdlerState s)
-
-testDecompressMedium :: forall s. [B.ByteString] -> ST s B.ByteString
-testDecompressMedium inputStrings = do
-  (outputPos, m) <- deflateInit
-  let loop :: [B.ByteString] -> Int -> ST s Int
-      loop []               pos = deflateFast True B.empty m pos
-      loop (current : rest) pos = do
-        newPos <- deflateFast False current m pos
-        loop rest newPos
-  outputLen <- loop inputStrings outputPos
-  let finalLen = outputLen
-  ovec <- V.freeze (MV.take finalLen (outputBuf m))
-  return (SBS.fromShort (toByteString ovec))
-
-chunksOfBs :: Int -> B.ByteString -> [B.ByteString]
-chunksOfBs n s | B.null s  = []
-               | otherwise =
-  let (chunk, rest) = B.splitAt (fromIntegral n) s
-  in chunk : chunksOfBs n rest
-
-fileTest :: Int -> FilePath -> IO B.ByteString
-fileTest chunkSize fn = do
-  uncompr <- B.readFile fn
-  let chunks = chunksOfBs chunkSize uncompr
-  compr <- stToIO (testDecompressMedium chunks)
-  print $ B.unpack $ B.take 100 compr
-  return compr
-
-example4test :: IO B.ByteString
-example4test = fileTest 100 "/home/oleg/haskell/pure-hs-zlib/data/example4.json"
-
-example4first1ktest :: IO B.ByteString
-example4first1ktest = fileTest 100 "/home/oleg/haskell/pure-hs-zlib/data/example4.first-1024-bytes.json"
-
-exampleRepetitive100 :: IO B.ByteString
-exampleRepetitive100 = fileTest 20 "/home/oleg/haskell/pure-hs-zlib/data/repetitive100.txt"
-
-exampleRepetitive80 :: IO B.ByteString
-exampleRepetitive80 = fileTest 40 "/home/oleg/haskell/pure-hs-zlib/data/repetitive80.txt"
 
 litTree :: [(Int, Int, Int)]
 litTree = computeCodeValues
