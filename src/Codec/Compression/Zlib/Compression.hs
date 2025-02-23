@@ -2,7 +2,13 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module Codec.Compression.Zlib.Compression where
+module Codec.Compression.Zlib.Compression (
+  deflateInit,
+  deflateFast,
+  compressToBuilder,
+  compress,
+  MutableData(..),
+) where
 
 import Data.Bits
 import Data.Foldable (Foldable(..))
@@ -12,24 +18,31 @@ import qualified Data.Vector.Primitive.Mutable as MV
 import qualified Data.Vector.Fusion.Bundle.Monadic as VM
 import qualified Data.Stream.Monadic as VS
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Short as SBS
 import qualified Data.IntMap.Strict as Map
 import Data.Array (Array, accumArray, array, (!))
 import Control.Monad (forM_, when, unless, zipWithM_)
 import GHC.ST (ST (..))
 import Data.STRef (newSTRef, modifySTRef', readSTRef, writeSTRef)
-import Control.Monad.ST (stToIO)
+import Control.Monad.ST (runST, stToIO)
 import GHC.STRef (STRef (..))
 import GHC.Word (Word8, Word16, Word32)
 
-import Codec.Compression.Zlib.Adler32
-import Codec.Compression.Zlib.Deflate
-import Codec.Compression.Zlib.OutputWindow
+import Codec.Compression.Zlib.Adler32 (
+  AdlerState,
+  advanceAdlerBlock,
+  finalizeAdler,
+  initialAdlerState,
+ )
+import Codec.Compression.Zlib.Deflate (computeCodeValues)
+import Codec.Compression.Zlib.OutputWindow (fromByteString, toByteString)
 
 
 data MatchInfo = MatchInfo
-  { match_distance :: {-# UNPACK #-} !Word16
-  , match_length :: {-# UNPACK #-} !Word8
+  { matchDistance :: {-# UNPACK #-} !Word16
+  , matchLength :: {-# UNPACK #-} !Word8
   }
   deriving (Show)
 
@@ -303,7 +316,6 @@ clearBuffers m = do
   MV.set (hash m) 0
   MV.set (prev m) 0
 
--- TODO: resulting BlockState is never used?
 -- The loop used in `deflateFast`
 dgo :: forall s. B.ByteString -> Bool -> MutableData s -> Int -> Int -> Int -> ST s ()
 dgo input haveInput md@MutableData{..} strstart nextIn lookahead = do
@@ -397,6 +409,33 @@ deflateFast final inputString md@MutableData{..} outputPos = do
   else do
     emptyLen <- flushEmptyNonCompressedBlock (MV.drop newPos outputBuf) nextBit 
     return (newPos + emptyLen)
+
+compressToBuilder :: forall s. BL.ByteString -> ST s BB.Builder
+compressToBuilder input = do
+  (initLen, mutableData) <- deflateInit
+  let oBuf :: MV.MVector s Word8
+      oBuf = outputBuf mutableData
+      fromBuffer :: Int -> ST s BB.Builder
+      fromBuffer len = do
+        vec <- V.freeze (MV.take len oBuf)
+        let chunk = BB.shortByteString (toByteString vec)
+        MV.set oBuf 0
+        return chunk
+      loop :: [B.ByteString] -> ST s BB.Builder
+      loop []               = do
+        len <- deflateFast True B.empty mutableData 0
+        fromBuffer len
+      loop (current : rest) = do
+        len <- deflateFast False current mutableData 0
+        chunk <- fromBuffer len
+        restCompressed <- loop rest
+        return (chunk <> restCompressed)
+  initChunk <- fromBuffer initLen
+  restCompressed <- loop (BL.toChunks input)
+  return (initChunk <> restCompressed)
+
+compress :: BL.ByteString -> BL.ByteString
+compress input = BB.toLazyByteString $ runST $ compressToBuilder input
 
 testDecompressMediumSingle :: B.ByteString -> ST s B.ByteString
 testDecompressMediumSingle inputString = do
