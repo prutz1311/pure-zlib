@@ -13,6 +13,8 @@ module Codec.Compression.Zlib.OutputWindow (
   addByte,
   addChunk,
   addOldChunk,
+  fromByteString,
+  toByteString,
 ) where
 
 import Control.Monad (foldM)
